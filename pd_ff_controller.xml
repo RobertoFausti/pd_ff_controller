@@ -1,0 +1,7 @@
+<library path="pd_ff_controller">
+  <class name="pd_ff_controller/PdFfController"
+         type="pd_ff_controller::PdFfController"
+         base_class_type="controller_interface::ChainableControllerInterface">
+    <description>PD + torque feedforward chainable controller.</description>
+  </class>
+</library>

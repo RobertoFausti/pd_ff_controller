@@ -1,0 +1,52 @@
+pd_ff_controller:
+  joint_names:
+    type: string_array
+    default_value: []
+    read_only: true
+    description: "Joints to control."
+    validation:
+      not_empty<>: []
+      unique<>: null
+  command_interface:
+    type: string
+    default_value: "effort"
+    read_only: true
+    description: "Hardware command interface type written to each joint."
+    validation:
+      not_empty<>: null
+
+  state_interfaces:
+    type: string_array
+    default_value: ["position", "velocity"]
+    read_only: true
+    description: >
+      Hardware state interface types to read, in order:
+      index 0 → P-term state, index 1 → D-term state.
+    validation:
+      not_empty<>: []
+      size_gt<>: 0
+      size_lt<>: 3
+
+  reference_interfaces:
+    type: string_array
+    default_value: ["position", "velocity", "effort"]
+    read_only: true
+    description: >
+      Reference interface types exported for chaining, in order:
+      index 0 → P-term ref, index 1 → D-term ref,
+      index > last state → feedforward (no state pair).
+    validation:
+      not_empty<>: []
+      size_gt<>: 0
+      size_lt<>: 4
+
+  gains:
+    __map_joint_names:
+      p:
+        type: double
+        default_value: 0.0
+        description: "Position error proportional gain."
+      d:
+        type: double
+        default_value: 0.0
+        description: "Velocity error derivative gain."
