@@ -1,8 +1,6 @@
 #pragma once
 
-#include <limits>
 #include <memory>
-#include <string>
 #include <vector>
 
 #include "controller_interface/chainable_controller_interface.hpp"
@@ -10,8 +8,9 @@
 #include "realtime_tools/realtime_publisher.hpp"
 #include "realtime_tools/realtime_thread_safe_box.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
-#include "trajectory_msgs/msg/joint_trajectory_point.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 
+#include "pd_ff_controller/pd_ff.hpp"
 #include "pd_ff_controller/pd_ff_controller_parameters.hpp"
 
 namespace pd_ff_controller
@@ -43,6 +42,8 @@ private:
   Params params_;
   size_t n_joints_{0};
 
+  PdFf algo_;
+
   // reference_interfaces_ (inherited backing storage) layout — interface-major:
   //   block k = [k*N .. (k+1)*N - 1]  →  params_.reference_interfaces[k], all joints
   //   default: block 0 = position, block 1 = velocity, block 2 = effort (FF)
@@ -53,7 +54,7 @@ private:
   //
   // Feedforward is active when n_ref > n_state; it occupies the last reference block.
 
-  using ReferenceMsg = trajectory_msgs::msg::JointTrajectoryPoint;
+  using ReferenceMsg = sensor_msgs::msg::JointState;
   rclcpp::Subscription<ReferenceMsg>::SharedPtr ref_sub_;
   realtime_tools::RealtimeThreadSafeBox<ReferenceMsg> input_ref_;
 

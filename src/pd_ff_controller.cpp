@@ -57,9 +57,9 @@ controller_interface::CallbackReturn PdFfController::on_configure(
     [this](const std::shared_ptr<ReferenceMsg> msg) { input_ref_.set(*msg); });
 
   ReferenceMsg nan_ref;
-  nan_ref.positions.assign(n_joints_,  std::numeric_limits<double>::quiet_NaN());
-  nan_ref.velocities.assign(n_joints_, std::numeric_limits<double>::quiet_NaN());
-  nan_ref.effort.assign(n_joints_,     std::numeric_limits<double>::quiet_NaN());
+  nan_ref.position.assign(12, std::numeric_limits<double>::quiet_NaN());
+  nan_ref.velocity.assign(12, std::numeric_limits<double>::quiet_NaN());
+  nan_ref.effort.assign(12, std::numeric_limits<double>::quiet_NaN());
   input_ref_.set(nan_ref);
 
   // pre-allocate message storage so the RT loop never allocates
@@ -71,6 +71,14 @@ controller_interface::CallbackReturn PdFfController::on_configure(
   tau_d_pub_ = get_node()->create_publisher<PdActionsMsg>("~/tau_d", pub_qos);
   rt_tau_p_pub_ = std::make_unique<PdActionsPublisher>(tau_p_pub_);
   rt_tau_d_pub_ = std::make_unique<PdActionsPublisher>(tau_d_pub_);
+
+  // Seed algorithm with initial gains.
+  std::vector<PdFf::JointGains> gains(n_joints_);
+  for (size_t i = 0; i < n_joints_; ++i) {
+    const auto & g = params_.gains.joint_names_map.at(params_.joint_names[i]);
+    gains[i] = {g.p, g.d};
+  }
+  algo_.setGains(gains);
 
   return CallbackReturn::SUCCESS;
 }
@@ -129,12 +137,18 @@ controller_interface::return_type PdFfController::update_reference_from_subscrib
   if (!ref_op.has_value()) return controller_interface::return_type::OK;
 
   const auto & ref = ref_op.value();
+  if (ref.position.size() != 12 || ref.velocity.size() != 12 || ref.effort.size() != 12) {
+    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+      "JointState reference size mismatch (pos=%zu vel=%zu eff=%zu, expected 12); skipping",
+      ref.position.size(), ref.velocity.size(), ref.effort.size());
+    return controller_interface::return_type::ERROR;
+  }
   const size_t n_ref = params_.reference_interfaces.size();
   for (size_t i = 0; i < n_joints_; ++i) {
-    if (n_ref >= 1 && i < ref.positions.size() && std::isfinite(ref.positions[i]))
-      reference_interfaces_[0 * n_joints_ + i] = ref.positions[i];
-    if (n_ref >= 2 && i < ref.velocities.size() && std::isfinite(ref.velocities[i]))
-      reference_interfaces_[1 * n_joints_ + i] = ref.velocities[i];
+    if (n_ref >= 1 && i < ref.position.size() && std::isfinite(ref.position[i]))
+      reference_interfaces_[0 * n_joints_ + i] = ref.position[i];
+    if (n_ref >= 2 && i < ref.velocity.size() && std::isfinite(ref.velocity[i]))
+      reference_interfaces_[1 * n_joints_ + i] = ref.velocity[i];
     if (n_ref >= 3 && i < ref.effort.size() && std::isfinite(ref.effort[i]))
       reference_interfaces_[2 * n_joints_ + i] = ref.effort[i];
   }
@@ -144,41 +158,52 @@ controller_interface::return_type PdFfController::update_reference_from_subscrib
 controller_interface::return_type PdFfController::update_and_write_commands(
   const rclcpp::Time &, const rclcpp::Duration &)
 {
+  // Refresh gains each cycle — they are declared dynamic in the YAML so they
+  // can be updated at runtime via ros2 param set without restarting the controller.
+  params_ = param_listener_->get_params();
+  std::vector<PdFf::JointGains> gains(n_joints_);
+  for (size_t i = 0; i < n_joints_; ++i) {
+    const auto & g = params_.gains.joint_names_map.at(params_.joint_names[i]);
+    gains[i] = {g.p, g.d};
+  }
+  algo_.setGains(gains);
+
+  // Build error and feedforward vectors from hardware/reference interfaces.
   const size_t n_ref   = params_.reference_interfaces.size();
   const size_t n_state = params_.state_interfaces.size();
 
-  for (size_t i = 0; i < n_joints_; ++i) {
-    tau_p_msg_.data[i] = 0.0;
-    tau_d_msg_.data[i] = 0.0;
+  Eigen::VectorXd pos_error = Eigen::VectorXd::Zero(n_joints_);
+  Eigen::VectorXd vel_error = Eigen::VectorXd::Zero(n_joints_);
+  Eigen::VectorXd ff        = Eigen::VectorXd::Zero(n_joints_);
 
-    // P term: reference[0] vs state[0]
+  for (size_t i = 0; i < n_joints_; ++i) {
     const double ref0   = reference_interfaces_[0 * n_joints_ + i];
     const auto   state0 = state_interfaces_[0 * n_joints_ + i].get_optional();
-    if (!state0 || !std::isfinite(ref0)) continue;
+    if (!state0.has_value() || !std::isfinite(ref0)) continue;
+    pos_error[i] = ref0 - state0.value();
 
-    const auto & g = params_.gains.joint_names_map.at(params_.joint_names[i]);
-    tau_p_msg_.data[i] = g.p * (ref0 - state0.value());
-    double tau = tau_p_msg_.data[i];
-
-    // D term: reference[1] vs state[1], when both are configured and finite
     if (n_ref >= 2 && n_state >= 2) {
       const double ref1   = reference_interfaces_[1 * n_joints_ + i];
       const auto   state1 = state_interfaces_[1 * n_joints_ + i].get_optional();
-      if (state1 && std::isfinite(ref1)) {
-        tau_d_msg_.data[i] = g.d * (ref1 - state1.value());
-        tau += tau_d_msg_.data[i];
-      }
+      if (state1.has_value() && std::isfinite(ref1))
+        vel_error[i] = ref1 - state1.value();
     }
 
-    // Feedforward: last reference slot when it has no paired state (n_ref > n_state)
     if (n_ref > n_state) {
-      const double ff = reference_interfaces_[(n_ref - 1) * n_joints_ + i];
-      if (std::isfinite(ff)) tau += ff;
+      const double ff_val = reference_interfaces_[(n_ref - 1) * n_joints_ + i];
+      if (std::isfinite(ff_val)) ff[i] = ff_val;
     }
+  }
 
-    if (!command_interfaces_[i].set_value(tau)) {
+  // Delegate to algorithm.
+  const auto out = algo_.compute(pos_error, vel_error, ff);
+
+  // Write commands and fill diagnostic messages.
+  for (size_t i = 0; i < n_joints_; ++i) {
+    tau_p_msg_.data[i] = out.tau_p[i];
+    tau_d_msg_.data[i] = out.tau_d[i];
+    if (!command_interfaces_[i].set_value(out.tau[i]))
       RCLCPP_ERROR(get_node()->get_logger(), "Cannot set command on dof [%zu]!", i);
-    }
   }
 
   rt_tau_p_pub_->try_publish(tau_p_msg_);
