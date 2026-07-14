@@ -57,9 +57,9 @@ controller_interface::CallbackReturn PdFfController::on_configure(
     [this](const std::shared_ptr<ReferenceMsg> msg) { input_ref_.set(*msg); });
 
   ReferenceMsg nan_ref;
-  nan_ref.position.assign(12, std::numeric_limits<double>::quiet_NaN());
-  nan_ref.velocity.assign(12, std::numeric_limits<double>::quiet_NaN());
-  nan_ref.effort.assign(12, std::numeric_limits<double>::quiet_NaN());
+  nan_ref.position.assign(n_joints_, std::numeric_limits<double>::quiet_NaN());
+  nan_ref.velocity.assign(n_joints_, std::numeric_limits<double>::quiet_NaN());
+  nan_ref.effort.assign(n_joints_, std::numeric_limits<double>::quiet_NaN());
   input_ref_.set(nan_ref);
 
   // pre-allocate message storage so the RT loop never allocates
@@ -137,10 +137,10 @@ controller_interface::return_type PdFfController::update_reference_from_subscrib
   if (!ref_op.has_value()) return controller_interface::return_type::OK;
 
   const auto & ref = ref_op.value();
-  if (ref.position.size() != 12 || ref.velocity.size() != 12 || ref.effort.size() != 12) {
+  if (ref.position.size() != n_joints_ || ref.velocity.size() != n_joints_ || ref.effort.size() != n_joints_) {
     RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
-      "JointState reference size mismatch (pos=%zu vel=%zu eff=%zu, expected 12); skipping",
-      ref.position.size(), ref.velocity.size(), ref.effort.size());
+      "JointState reference size mismatch (pos=%zu vel=%zu eff=%zu, expected %zu); skipping",
+      ref.position.size(), ref.velocity.size(), ref.effort.size(), n_joints_);
     return controller_interface::return_type::ERROR;
   }
   const size_t n_ref = params_.reference_interfaces.size();
