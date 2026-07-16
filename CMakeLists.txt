@@ -5,6 +5,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 
 find_package(ament_cmake REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(control_toolbox REQUIRED)
 find_package(controller_interface REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(generate_parameter_library REQUIRED)
@@ -13,7 +15,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
+find_package(plan4ari_msgs REQUIRED)
 
 generate_parameter_library(pd_ff_controller_parameters
   src/pd_ff_controller.yaml
@@ -29,13 +31,14 @@ target_include_directories(pd_ff_controller PUBLIC
 )
 target_link_libraries(pd_ff_controller PUBLIC
   pd_ff_controller_parameters
+  control_toolbox::control_toolbox
   controller_interface::controller_interface
   hardware_interface::hardware_interface
   pluginlib::pluginlib
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
   realtime_tools::realtime_tools
-  ${sensor_msgs_TARGETS}
+  ${plan4ari_msgs_TARGETS}
 )
 
 pluginlib_export_plugin_description_file(controller_interface pd_ff_controller.xml)
@@ -49,8 +52,8 @@ install(TARGETS pd_ff_controller pd_ff_controller_parameters
 )
 ament_export_targets(export_pd_ff_controller HAS_LIBRARY_TARGET)
 ament_export_dependencies(
-  controller_interface hardware_interface generate_parameter_library
-  pluginlib rclcpp rclcpp_lifecycle realtime_tools std_msgs sensor_msgs
+  control_toolbox controller_interface hardware_interface generate_parameter_library
+  pluginlib rclcpp rclcpp_lifecycle realtime_tools std_msgs plan4ari_msgs
 )
 
 if(BUILD_TESTING)
@@ -61,17 +64,32 @@ if(BUILD_TESTING)
 
   ament_lint_auto_find_test_dependencies()
 
+  # Lean unit test for PdFf alone — no controller_interface/rclcpp/hardware_interface
+  # machinery, just the algorithm class, Eigen, and control_toolbox.
+  ament_add_gtest(test_pd_ff
+    test/test_pd_ff.cpp
+    src/pd_ff.cpp
+  )
+  target_include_directories(test_pd_ff PRIVATE
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+  )
+  target_link_libraries(test_pd_ff
+    control_toolbox::control_toolbox
+    Eigen3::Eigen
+  )
+
   ament_add_ros_isolated_gtest(test_pd_ff_controller
     test/test_pd_ff_controller.cpp
   )
   target_link_libraries(test_pd_ff_controller
     pd_ff_controller
     pd_ff_controller_parameters
+    control_toolbox::control_toolbox
     controller_interface::controller_interface
     hardware_interface::hardware_interface
     rclcpp::rclcpp
     rclcpp_lifecycle::rclcpp_lifecycle
-    ${sensor_msgs_TARGETS}
+    ${plan4ari_msgs_TARGETS}
     ${std_msgs_TARGETS}
   )
   target_include_directories(test_pd_ff_controller PRIVATE

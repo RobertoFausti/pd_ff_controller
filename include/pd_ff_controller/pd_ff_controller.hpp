@@ -8,7 +8,7 @@
 #include "realtime_tools/realtime_publisher.hpp"
 #include "realtime_tools/realtime_thread_safe_box.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
-#include "sensor_msgs/msg/joint_state.hpp"
+#include "plan4ari_msgs/msg/joint_cmd.hpp"
 
 #include "pd_ff_controller/pd_ff.hpp"
 #include "pd_ff_controller/pd_ff_controller_parameters.hpp"
@@ -31,7 +31,7 @@ public:
     const rclcpp::Time &, const rclcpp::Duration &) override;
 
   controller_interface::return_type update_and_write_commands(
-    const rclcpp::Time &, const rclcpp::Duration &) override;
+    const rclcpp::Time &, const rclcpp::Duration & period) override;
 
 protected:
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
@@ -46,27 +46,39 @@ private:
 
   // reference_interfaces_ (inherited backing storage) layout — interface-major:
   //   block k = [k*N .. (k+1)*N - 1]  →  params_.reference_interfaces[k], all joints
-  //   default: block 0 = position, block 1 = velocity, block 2 = effort (FF)
+  //   default: block 0 = position, block 1 = velocity, block 2 = effort, block 3 = gait_state
   //
   // state_interfaces_ (from HW) layout — same interface-major scheme:
   //   block k = [k*N .. (k+1)*N - 1]  →  params_.state_interfaces[k], all joints
   //   default: block 0 = position, block 1 = velocity
   //
-  // Feedforward is active when n_ref > n_state; it occupies the last reference block.
+  // "position"/"velocity" stay hardcoded to blocks 0/1. "effort" and
+  // "gait_state" have no paired state block and are resolved by NAME (scanned
+  // once in on_configure() into effort_block_idx_/gait_block_idx_) rather than
+  // by position, since either or both may be absent or reordered.
 
-  using ReferenceMsg = sensor_msgs::msg::JointState;
+  using ReferenceMsg = plan4ari_msgs::msg::JointCmd;
   rclcpp::Subscription<ReferenceMsg>::SharedPtr ref_sub_;
   realtime_tools::RealtimeThreadSafeBox<ReferenceMsg> input_ref_;
 
-  // Per-joint P and D action publishers. Messages are pre-allocated in on_configure;
+  int effort_block_idx_{-1};   // index of "effort" in params_.reference_interfaces, or -1
+  int gait_block_idx_{-1};     // index of "gait_state" in params_.reference_interfaces, or -1
+  size_t n_legs_{0};
+  std::vector<int64_t> joint_to_leg_number_;   // size n_joints_; joint i -> its leg's leg_number
+  std::vector<bool> joint_is_swing_;           // size n_joints_; previous-cycle phase per joint
+
+  // Per-joint P, I and D action publishers. Messages are pre-allocated in on_configure;
   // data[i] is overwritten each cycle and published via try_publish (RT-safe).
   using PdActionsMsg = std_msgs::msg::Float64MultiArray;
   using PdActionsPublisher = realtime_tools::RealtimePublisher<PdActionsMsg>;
   rclcpp::Publisher<PdActionsMsg>::SharedPtr tau_p_pub_;
+  rclcpp::Publisher<PdActionsMsg>::SharedPtr tau_i_pub_;
   rclcpp::Publisher<PdActionsMsg>::SharedPtr tau_d_pub_;
   std::unique_ptr<PdActionsPublisher> rt_tau_p_pub_;
+  std::unique_ptr<PdActionsPublisher> rt_tau_i_pub_;
   std::unique_ptr<PdActionsPublisher> rt_tau_d_pub_;
   PdActionsMsg tau_p_msg_;
+  PdActionsMsg tau_i_msg_;
   PdActionsMsg tau_d_msg_;
 };
 

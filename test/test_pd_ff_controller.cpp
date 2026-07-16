@@ -23,7 +23,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
-#include "trajectory_msgs/msg/joint_trajectory_point.hpp"
+#include "plan4ari_msgs/msg/joint_cmd.hpp"
 
 #include "pd_ff_controller/pd_ff_controller.hpp"
 
@@ -51,13 +51,35 @@ protected:
   }
 
   // Build NodeOptions with parameter_overrides for the controller.
-  // gains_p / gains_d are indexed to joint_names.
+  // gains_p / gains_d / gains_i / gains_i_max / gains_i_min are indexed to
+  // joint_names and apply to BOTH the stance and swing gain sets, unless a
+  // corresponding gains_*_swing vector is supplied (non-empty for that index),
+  // in which case swing gets the override and stance keeps the base value.
+  // The integral-related params default to empty vectors, which resolve to
+  // i=0.0/i_max=0.0/i_min=0.0 per joint/phase.
+  //
+  // Leg grouping: if legs_names is empty (the common case), a trivial 1:1
+  // joint->leg mapping is auto-generated (leg "leg_<joint>", leg_number = its
+  // index in joint_names) so every existing call site satisfies on_configure()'s
+  // "every joint covered by exactly one leg" validation without change. Pass
+  // legs_names/legs_joint_names/legs_numbers explicitly to test custom grouping
+  // or deliberately-invalid configurations (e.g. an uncovered joint, or two legs
+  // sharing a leg_number).
   rclcpp::NodeOptions build_node_opts(
     const std::vector<std::string> & joint_names,
     const std::vector<double> & gains_p,
     const std::vector<double> & gains_d,
-    const std::vector<std::string> & ref_ifaces = {"position", "velocity", "effort"},
-    const std::vector<std::string> & state_ifaces = {"position", "velocity"})
+    const std::vector<std::string> & ref_ifaces = {"position", "velocity", "effort", "gait_state"},
+    const std::vector<std::string> & state_ifaces = {"position", "velocity"},
+    const std::vector<double> & gains_i = {},
+    const std::vector<double> & gains_i_max = {},
+    const std::vector<double> & gains_i_min = {},
+    const std::vector<double> & gains_p_swing = {},
+    const std::vector<double> & gains_d_swing = {},
+    const std::vector<double> & gains_i_swing = {},
+    const std::vector<std::string> & legs_names = {},
+    const std::vector<std::vector<std::string>> & legs_joint_names = {},
+    const std::vector<int64_t> & legs_numbers = {})
   {
     std::vector<rclcpp::Parameter> overrides;
     overrides.emplace_back("joint_names",          joint_names);
@@ -66,10 +88,41 @@ protected:
     overrides.emplace_back("state_interfaces",      state_ifaces);
 
     for (std::size_t i = 0; i < joint_names.size(); ++i) {
-      overrides.emplace_back("gains." + joint_names[i] + ".p",
-        i < gains_p.size() ? gains_p[i] : 0.0);
-      overrides.emplace_back("gains." + joint_names[i] + ".d",
-        i < gains_d.size() ? gains_d[i] : 0.0);
+      const double p     = i < gains_p.size() ? gains_p[i] : 0.0;
+      const double d     = i < gains_d.size() ? gains_d[i] : 0.0;
+      const double gi    = i < gains_i.size() ? gains_i[i] : 0.0;
+      const double i_max = i < gains_i_max.size() ? gains_i_max[i] : 0.0;
+      const double i_min = i < gains_i_min.size() ? gains_i_min[i] : 0.0;
+      const double p_sw  = i < gains_p_swing.size() ? gains_p_swing[i] : p;
+      const double d_sw  = i < gains_d_swing.size() ? gains_d_swing[i] : d;
+      const double i_sw  = i < gains_i_swing.size() ? gains_i_swing[i] : gi;
+
+      for (const auto & phase : {std::string("stance"), std::string("swing")}) {
+        const bool is_swing = (phase == "swing");
+        const std::string prefix = "gains." + joint_names[i] + "." + phase + ".";
+        overrides.emplace_back(prefix + "p", is_swing ? p_sw : p);
+        overrides.emplace_back(prefix + "d", is_swing ? d_sw : d);
+        overrides.emplace_back(prefix + "i", is_swing ? i_sw : gi);
+        overrides.emplace_back(prefix + "i_max", i_max);
+        overrides.emplace_back(prefix + "i_min", i_min);
+      }
+    }
+
+    // Leg grouping — explicit override, or a trivial 1:1 default.
+    std::vector<std::string> names = legs_names;
+    std::vector<std::vector<std::string>> joints = legs_joint_names;
+    if (names.empty()) {
+      for (const auto & jn : joint_names) {
+        names.push_back("leg_" + jn);
+        joints.push_back({jn});
+      }
+    }
+    overrides.emplace_back("leg_names", names);
+    for (std::size_t k = 0; k < names.size(); ++k) {
+      const int64_t leg_number =
+        k < legs_numbers.size() ? legs_numbers[k] : static_cast<int64_t>(k);
+      overrides.emplace_back("legs." + names[k] + ".leg_number", leg_number);
+      overrides.emplace_back("legs." + names[k] + ".joint_names", joints[k]);
     }
 
     rclcpp::NodeOptions opts;
@@ -82,12 +135,25 @@ protected:
     const std::vector<std::string> & joint_names,
     const std::vector<double> & gains_p,
     const std::vector<double> & gains_d,
-    const std::vector<std::string> & ref_ifaces = {"position", "velocity", "effort"},
-    const std::vector<std::string> & state_ifaces = {"position", "velocity"})
+    const std::vector<std::string> & ref_ifaces = {"position", "velocity", "effort", "gait_state"},
+    const std::vector<std::string> & state_ifaces = {"position", "velocity"},
+    const std::vector<double> & gains_i = {},
+    const std::vector<double> & gains_i_max = {},
+    const std::vector<double> & gains_i_min = {},
+    const std::vector<double> & gains_p_swing = {},
+    const std::vector<double> & gains_d_swing = {},
+    const std::vector<double> & gains_i_swing = {},
+    const std::vector<std::string> & legs_names = {},
+    const std::vector<std::vector<std::string>> & legs_joint_names = {},
+    const std::vector<int64_t> & legs_numbers = {})
   {
     return ctrl_->init(
       "test_pd_ff", "", 1000u, "",
-      build_node_opts(joint_names, gains_p, gains_d, ref_ifaces, state_ifaces));
+      build_node_opts(
+        joint_names, gains_p, gains_d, ref_ifaces, state_ifaces,
+        gains_i, gains_i_max, gains_i_min,
+        gains_p_swing, gains_d_swing, gains_i_swing,
+        legs_names, legs_joint_names, legs_numbers));
   }
 
   ci::CallbackReturn configure()
@@ -250,14 +316,14 @@ TEST_F(PdFfControllerTest, StateInterfaceConfiguration_PositionOnly_TwoNames)
 
 // ── export_reference_interfaces ───────────────────────────────────────────────
 
-TEST_F(PdFfControllerTest, ExportReferenceInterfaces_DefaultConfig_SixInterfaces)
+TEST_F(PdFfControllerTest, ExportReferenceInterfaces_DefaultConfig_EightInterfaces)
 {
-  // 2 joints × 3 ref_ifaces = 6
+  // 2 joints × 4 ref_ifaces (position, velocity, effort, gait_state) = 8
   ASSERT_EQ(init_controller({"j1", "j2"}, {10.0, 10.0}, {0.5, 0.5}), ci::return_type::OK);
   ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
 
   const auto refs = ctrl_->export_reference_interfaces();
-  EXPECT_EQ(refs.size(), 6u);
+  EXPECT_EQ(refs.size(), 8u);
 }
 
 TEST_F(PdFfControllerTest, ExportReferenceInterfaces_AllValuesNaN)
@@ -449,15 +515,20 @@ TEST_F(PdFfControllerTest, UpdateRefFromSubscribers_FinitePosition_Applied)
   export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
   ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
 
-  // Publish a reference with a known finite position.
+  // Publish a reference with a known finite position. All arrays must be
+  // correctly sized (name/position/velocity/torque = n_joints_, gait_state =
+  // n_legs_) or the whole message is rejected — velocity/torque are NaN here
+  // to isolate the position-only assertion below.
   auto pub_node = rclcpp::Node::make_shared("test_ref_pub");
-  auto pub = pub_node->create_publisher<trajectory_msgs::msg::JointTrajectoryPoint>(
+  auto pub = pub_node->create_publisher<plan4ari_msgs::msg::JointCmd>(
     "/test_pd_ff/reference", rclcpp::SystemDefaultsQoS());
 
-  trajectory_msgs::msg::JointTrajectoryPoint ref;
-  ref.positions = {0.5};
-  ref.velocities = {};
-  ref.effort = {};
+  plan4ari_msgs::msg::JointCmd ref;
+  ref.name = {"j1"};
+  ref.position = {0.5};
+  ref.velocity = {std::numeric_limits<double>::quiet_NaN()};
+  ref.torque = {std::numeric_limits<double>::quiet_NaN()};
+  ref.gait_state = {plan4ari_msgs::msg::JointCmd::STANCE};
   pub->publish(ref);
 
   // Spin to deliver message.
@@ -482,11 +553,15 @@ TEST_F(PdFfControllerTest, UpdateRefFromSubscribers_NaNPosition_DoesNotOverwrite
   ctrl_->reference_interfaces_[0] = 99.0;
 
   auto pub_node = rclcpp::Node::make_shared("test_ref_pub_nan");
-  auto pub = pub_node->create_publisher<trajectory_msgs::msg::JointTrajectoryPoint>(
+  auto pub = pub_node->create_publisher<plan4ari_msgs::msg::JointCmd>(
     "/test_pd_ff/reference", rclcpp::SystemDefaultsQoS());
 
-  trajectory_msgs::msg::JointTrajectoryPoint ref;
-  ref.positions = {std::numeric_limits<double>::quiet_NaN()};
+  plan4ari_msgs::msg::JointCmd ref;
+  ref.name = {"j1"};
+  ref.position = {std::numeric_limits<double>::quiet_NaN()};
+  ref.velocity = {std::numeric_limits<double>::quiet_NaN()};
+  ref.torque = {std::numeric_limits<double>::quiet_NaN()};
+  ref.gait_state = {plan4ari_msgs::msg::JointCmd::STANCE};
   pub->publish(ref);
 
   rclcpp::executors::SingleThreadedExecutor exec;
@@ -625,6 +700,250 @@ TEST_F(PdFfControllerTest, TauDPublisher_ValuesMatchDTerms)
   ASSERT_EQ(received->data.size(), 2u);
   EXPECT_NEAR(received->data[0], 3.0, 1e-9);  // j1: 3 * 1.0
   EXPECT_NEAR(received->data[1], 2.0, 1e-9);  // j2: 4 * 0.5
+}
+
+// ── integral action ──────────────────────────────────────────────────────────
+
+TEST_F(PdFfControllerTest, UpdateCommands_Integral_AccumulatesOverMultipleCycles)
+{
+  ASSERT_EQ(
+    init_controller({"j1"}, {0.0}, {0.0}, {"position", "velocity", "effort"},
+      {"position", "velocity"}, /*gains_i=*/{2.0}, /*gains_i_max=*/{1000.0},
+      /*gains_i_min=*/{-1000.0}),
+    ci::return_type::OK);
+  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
+  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+
+  ctrl_->reference_interfaces_[0] = 1.0;  // constant pos_ref; state_pos stays 0.0
+
+  // control_toolbox's BACK_CALCULATION integral update reports the
+  // *pre-update* accumulator each call (one-cycle lag): the first cycle
+  // reports the still-zero initial state, and each subsequent cycle reports
+  // the previous cycle's accumulation of i_gain * (dt/1s) * pos_error.
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
+
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  EXPECT_NEAR(cmd_storage_[0], 0.002, 1e-9);
+
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  EXPECT_NEAR(cmd_storage_[0], 0.004, 1e-9);
+}
+
+TEST_F(PdFfControllerTest, UpdateCommands_Integral_ClampedByIMaxIMin)
+{
+  ASSERT_EQ(
+    init_controller({"j1"}, {0.0}, {0.0}, {"position", "velocity", "effort"},
+      {"position", "velocity"}, /*gains_i=*/{100.0}, /*gains_i_max=*/{0.01},
+      /*gains_i_min=*/{-0.01}),
+    ci::return_type::OK);
+  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
+  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+
+  ctrl_->reference_interfaces_[0] = 1.0;  // large constant pos_error
+
+  // First cycle reports the still-zero pre-update accumulator (see the
+  // one-cycle-lag note in UpdateCommands_Integral_AccumulatesOverMultipleCycles);
+  // from the second cycle on, back_calculation has already saturated i_term at
+  // i_max and keeps it there.
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
+
+  for (int k = 0; k < 3; ++k) {
+    ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+    EXPECT_NEAR(cmd_storage_[0], 0.01, 1e-9);
+  }
+}
+
+TEST_F(PdFfControllerTest, OnActivate_ResetsIntegralAccumulator)
+{
+  ASSERT_EQ(
+    init_controller({"j1"}, {0.0}, {0.0}, {"position", "velocity", "effort"},
+      {"position", "velocity"}, /*gains_i=*/{2.0}, /*gains_i_max=*/{1000.0},
+      /*gains_i_min=*/{-1000.0}),
+    ci::return_type::OK);
+  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
+  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+
+  ctrl_->reference_interfaces_[0] = 1.0;
+  for (int k = 0; k < 3; ++k) {
+    ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  }
+  ASSERT_GT(cmd_storage_[0], 0.0);  // integral has built up
+
+  // Reactivate: algo_.reset() clears the integral accumulator, and on_activate()
+  // reseeds reference_interfaces_ from the current (still-zero) hardware state.
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+  EXPECT_NEAR(ctrl_->reference_interfaces_[0], 0.0, 1e-9);
+
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
+}
+
+// ── diagnostic publishers (tau_i) ───────────────────────────────────────────
+
+TEST_F(PdFfControllerTest, TauIPublisher_SizeMatchesNJoints)
+{
+  ASSERT_EQ(init_controller({"j1", "j2", "j3"}, {1.0, 1.0, 1.0}, {0.0, 0.0, 0.0}),
+    ci::return_type::OK);
+  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
+  export_and_assign_interfaces({"j1", "j2", "j3"}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+
+  std::optional<std_msgs::msg::Float64MultiArray> received;
+  auto sub_node = rclcpp::Node::make_shared("test_tau_i_sub");
+  auto sub = sub_node->create_subscription<std_msgs::msg::Float64MultiArray>(
+    "/test_pd_ff/tau_i", rclcpp::SystemDefaultsQoS(),
+    [&received](std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+      received = *msg;
+    });
+
+  ctrl_->reference_interfaces_[0] = 1.0;
+  ctrl_->reference_interfaces_[1] = 1.0;
+  ctrl_->reference_interfaces_[2] = 1.0;
+  ctrl_->update(t0(), dt1ms());
+
+  rclcpp::executors::SingleThreadedExecutor exec;
+  exec.add_node(ctrl_->get_node()->get_node_base_interface());
+  exec.add_node(sub_node);
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  while (!received && std::chrono::steady_clock::now() < deadline) {
+    exec.spin_some(std::chrono::milliseconds(10));
+  }
+
+  ASSERT_TRUE(received.has_value());
+  EXPECT_EQ(received->data.size(), 3u);
+}
+
+// ── leg grouping & gait-state gain switching ────────────────────────────────
+
+TEST_F(PdFfControllerTest, UpdateRefFromSubscribers_GaitStateSwing_SelectsSwingGains)
+{
+  ASSERT_EQ(
+    init_controller({"j1"}, {10.0}, {0.0}, {"position", "velocity", "effort", "gait_state"},
+      {"position", "velocity"}, /*gains_i=*/{}, /*gains_i_max=*/{}, /*gains_i_min=*/{},
+      /*gains_p_swing=*/{20.0}),
+    ci::return_type::OK);
+  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
+  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+
+  // Publish a reference with gait_state=SWING for j1's (single, auto-generated) leg.
+  auto pub_node = rclcpp::Node::make_shared("test_gait_pub");
+  auto pub = pub_node->create_publisher<plan4ari_msgs::msg::JointCmd>(
+    "/test_pd_ff/reference", rclcpp::SystemDefaultsQoS());
+
+  plan4ari_msgs::msg::JointCmd ref;
+  ref.name = {"j1"};
+  ref.position = {1.0};
+  ref.velocity = {std::numeric_limits<double>::quiet_NaN()};
+  ref.torque = {std::numeric_limits<double>::quiet_NaN()};
+  ref.gait_state = {plan4ari_msgs::msg::JointCmd::SWING};
+  pub->publish(ref);
+
+  rclcpp::executors::SingleThreadedExecutor exec;
+  exec.add_node(ctrl_->get_node()->get_node_base_interface());
+  exec.add_node(pub_node);
+  exec.spin_some(std::chrono::milliseconds(100));
+
+  ASSERT_EQ(ctrl_->update_reference_from_subscribers(t0(), dt1ms()), ci::return_type::OK);
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+
+  // Swing gain (20.0) selected, not stance (10.0): tau = 20 * (1.0 - 0.0) = 20.0
+  EXPECT_NEAR(cmd_storage_[0], 20.0, 1e-9);
+}
+
+TEST_F(PdFfControllerTest, UpdateCommands_ChainedGaitStateSwing_SelectsSwingGains)
+{
+  ASSERT_EQ(
+    init_controller({"j1"}, {10.0}, {0.0}, {"position", "velocity", "effort", "gait_state"},
+      {"position", "velocity"}, /*gains_i=*/{}, /*gains_i_max=*/{}, /*gains_i_min=*/{},
+      /*gains_p_swing=*/{20.0}),
+    ci::return_type::OK);
+  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
+  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+
+  // Drive gait_state directly through reference_interfaces_ (as a chained
+  // upstream controller would, without any subscriber involved). Block 3 is
+  // "gait_state" in the default 4-block reference_interfaces list.
+  ctrl_->reference_interfaces_[0] = 1.0;  // pos_ref
+  ctrl_->reference_interfaces_[3] = 1.0;  // gait_state: SWING
+
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+
+  // Swing gain (20.0) selected: tau = 20 * 1.0 = 20.0
+  EXPECT_NEAR(cmd_storage_[0], 20.0, 1e-9);
+}
+
+TEST_F(PdFfControllerTest, UpdateCommands_PhaseFlip_ResetsIntegralAccumulator)
+{
+  ASSERT_EQ(
+    init_controller({"j1"}, {0.0}, {0.0}, {"position", "velocity", "effort", "gait_state"},
+      {"position", "velocity"}, /*gains_i=*/{2.0}, /*gains_i_max=*/{1000.0},
+      /*gains_i_min=*/{-1000.0}),
+    ci::return_type::OK);
+  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
+  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+
+  ctrl_->reference_interfaces_[0] = 1.0;  // constant pos_ref; gait_state (block 3) stays 0.0=STANCE
+
+  // See the one-cycle-lag note in UpdateCommands_Integral_AccumulatesOverMultipleCycles.
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  EXPECT_NEAR(cmd_storage_[0], 0.002, 1e-9);
+
+  // Flip to swing — the joint's integral accumulator is reset this cycle.
+  ctrl_->reference_interfaces_[3] = 1.0;  // gait_state: SWING
+  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
+  // Without the reset this would be 0.004 (continuing accumulation); with the
+  // reset it restarts from zero, matching the very first cycle's value.
+  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
+}
+
+TEST_F(PdFfControllerTest, OnActivate_GaitStateBlockDefaultsToStance)
+{
+  ASSERT_EQ(init_controller({"j1"}, {10.0}, {0.0}), ci::return_type::OK);
+  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
+  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
+  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
+
+  // gait_state is block index 3 in the default reference_interfaces list
+  // (position, velocity, effort, gait_state); it has no paired state, so
+  // on_activate leaves it at 0.0 = STANCE.
+  EXPECT_DOUBLE_EQ(ctrl_->reference_interfaces_[3], 0.0);
+}
+
+TEST_F(PdFfControllerTest, OnConfigure_JointNotCoveredByAnyLeg_ReturnsError)
+{
+  ASSERT_EQ(
+    init_controller({"j1", "j2"}, {10.0, 10.0}, {0.0, 0.0},
+      {"position", "velocity", "effort", "gait_state"}, {"position", "velocity"},
+      /*gains_i=*/{}, /*gains_i_max=*/{}, /*gains_i_min=*/{},
+      /*gains_p_swing=*/{}, /*gains_d_swing=*/{}, /*gains_i_swing=*/{},
+      /*legs_names=*/{"legA"}, /*legs_joint_names=*/{{"j1"}}),
+    ci::return_type::OK);
+  // j2 is not covered by any leg.
+  EXPECT_EQ(configure(), ci::CallbackReturn::ERROR);
+}
+
+TEST_F(PdFfControllerTest, OnConfigure_DuplicateLegNumber_ReturnsError)
+{
+  ASSERT_EQ(
+    init_controller({"j1", "j2"}, {10.0, 10.0}, {0.0, 0.0},
+      {"position", "velocity", "effort", "gait_state"}, {"position", "velocity"},
+      /*gains_i=*/{}, /*gains_i_max=*/{}, /*gains_i_min=*/{},
+      /*gains_p_swing=*/{}, /*gains_d_swing=*/{}, /*gains_i_swing=*/{},
+      /*legs_names=*/{"legA", "legB"}, /*legs_joint_names=*/{{"j1"}, {"j2"}},
+      /*legs_numbers=*/{0, 0}),
+    ci::return_type::OK);
+  EXPECT_EQ(configure(), ci::CallbackReturn::ERROR);
 }
 
 // ── edge case: missing gain entry ─────────────────────────────────────────────

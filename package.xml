@@ -6,6 +6,7 @@
   <maintainer email="robertofausti@cnr.it">Roberto Fausti</maintainer>
   <license>Apache-2.0</license>
 
+  <depend>control_toolbox</depend>
   <depend>controller_interface</depend>
   <depend>std_msgs</depend>
   <depend>hardware_interface</depend>
@@ -14,7 +15,7 @@
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
   <depend>realtime_tools</depend>
-  <depend>sensor_msgs</depend>
+  <depend>plan4ari_msgs</depend>
 
   <test_depend>ament_cmake_ros</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
