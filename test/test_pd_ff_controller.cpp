@@ -51,12 +51,10 @@ protected:
   }
 
   // Build NodeOptions with parameter_overrides for the controller.
-  // gains_p / gains_d / gains_i / gains_i_max / gains_i_min are indexed to
-  // joint_names and apply to BOTH the stance and swing gain sets, unless a
-  // corresponding gains_*_swing vector is supplied (non-empty for that index),
-  // in which case swing gets the override and stance keeps the base value.
-  // The integral-related params default to empty vectors, which resolve to
-  // i=0.0/i_max=0.0/i_min=0.0 per joint/phase.
+  // gains_p / gains_d are indexed to joint_names and apply to BOTH the stance
+  // and swing gain sets, unless a corresponding gains_*_swing vector is
+  // supplied (non-empty for that index), in which case swing gets the
+  // override and stance keeps the base value.
   //
   // Leg grouping: if legs_names is empty (the common case), a trivial 1:1
   // joint->leg mapping is auto-generated (leg "leg_<joint>", leg_number = its
@@ -71,12 +69,8 @@ protected:
     const std::vector<double> & gains_d,
     const std::vector<std::string> & ref_ifaces = {"position", "velocity", "effort", "gait_state"},
     const std::vector<std::string> & state_ifaces = {"position", "velocity"},
-    const std::vector<double> & gains_i = {},
-    const std::vector<double> & gains_i_max = {},
-    const std::vector<double> & gains_i_min = {},
     const std::vector<double> & gains_p_swing = {},
     const std::vector<double> & gains_d_swing = {},
-    const std::vector<double> & gains_i_swing = {},
     const std::vector<std::string> & legs_names = {},
     const std::vector<std::vector<std::string>> & legs_joint_names = {},
     const std::vector<int64_t> & legs_numbers = {})
@@ -90,21 +84,14 @@ protected:
     for (std::size_t i = 0; i < joint_names.size(); ++i) {
       const double p     = i < gains_p.size() ? gains_p[i] : 0.0;
       const double d     = i < gains_d.size() ? gains_d[i] : 0.0;
-      const double gi    = i < gains_i.size() ? gains_i[i] : 0.0;
-      const double i_max = i < gains_i_max.size() ? gains_i_max[i] : 0.0;
-      const double i_min = i < gains_i_min.size() ? gains_i_min[i] : 0.0;
       const double p_sw  = i < gains_p_swing.size() ? gains_p_swing[i] : p;
       const double d_sw  = i < gains_d_swing.size() ? gains_d_swing[i] : d;
-      const double i_sw  = i < gains_i_swing.size() ? gains_i_swing[i] : gi;
 
       for (const auto & phase : {std::string("stance"), std::string("swing")}) {
         const bool is_swing = (phase == "swing");
         const std::string prefix = "gains." + joint_names[i] + "." + phase + ".";
         overrides.emplace_back(prefix + "p", is_swing ? p_sw : p);
         overrides.emplace_back(prefix + "d", is_swing ? d_sw : d);
-        overrides.emplace_back(prefix + "i", is_swing ? i_sw : gi);
-        overrides.emplace_back(prefix + "i_max", i_max);
-        overrides.emplace_back(prefix + "i_min", i_min);
       }
     }
 
@@ -137,12 +124,8 @@ protected:
     const std::vector<double> & gains_d,
     const std::vector<std::string> & ref_ifaces = {"position", "velocity", "effort", "gait_state"},
     const std::vector<std::string> & state_ifaces = {"position", "velocity"},
-    const std::vector<double> & gains_i = {},
-    const std::vector<double> & gains_i_max = {},
-    const std::vector<double> & gains_i_min = {},
     const std::vector<double> & gains_p_swing = {},
     const std::vector<double> & gains_d_swing = {},
-    const std::vector<double> & gains_i_swing = {},
     const std::vector<std::string> & legs_names = {},
     const std::vector<std::vector<std::string>> & legs_joint_names = {},
     const std::vector<int64_t> & legs_numbers = {})
@@ -151,8 +134,7 @@ protected:
       "test_pd_ff", "", 1000u, "",
       build_node_opts(
         joint_names, gains_p, gains_d, ref_ifaces, state_ifaces,
-        gains_i, gains_i_max, gains_i_min,
-        gains_p_swing, gains_d_swing, gains_i_swing,
+        gains_p_swing, gains_d_swing,
         legs_names, legs_joint_names, legs_numbers));
   }
 
@@ -702,131 +684,13 @@ TEST_F(PdFfControllerTest, TauDPublisher_ValuesMatchDTerms)
   EXPECT_NEAR(received->data[1], 2.0, 1e-9);  // j2: 4 * 0.5
 }
 
-// ── integral action ──────────────────────────────────────────────────────────
-
-TEST_F(PdFfControllerTest, UpdateCommands_Integral_AccumulatesOverMultipleCycles)
-{
-  ASSERT_EQ(
-    init_controller({"j1"}, {0.0}, {0.0}, {"position", "velocity", "effort"},
-      {"position", "velocity"}, /*gains_i=*/{2.0}, /*gains_i_max=*/{1000.0},
-      /*gains_i_min=*/{-1000.0}),
-    ci::return_type::OK);
-  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
-  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
-  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
-
-  ctrl_->reference_interfaces_[0] = 1.0;  // constant pos_ref; state_pos stays 0.0
-
-  // control_toolbox's BACK_CALCULATION integral update reports the
-  // *pre-update* accumulator each call (one-cycle lag): the first cycle
-  // reports the still-zero initial state, and each subsequent cycle reports
-  // the previous cycle's accumulation of i_gain * (dt/1s) * pos_error.
-  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
-
-  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  EXPECT_NEAR(cmd_storage_[0], 0.002, 1e-9);
-
-  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  EXPECT_NEAR(cmd_storage_[0], 0.004, 1e-9);
-}
-
-TEST_F(PdFfControllerTest, UpdateCommands_Integral_ClampedByIMaxIMin)
-{
-  ASSERT_EQ(
-    init_controller({"j1"}, {0.0}, {0.0}, {"position", "velocity", "effort"},
-      {"position", "velocity"}, /*gains_i=*/{100.0}, /*gains_i_max=*/{0.01},
-      /*gains_i_min=*/{-0.01}),
-    ci::return_type::OK);
-  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
-  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
-  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
-
-  ctrl_->reference_interfaces_[0] = 1.0;  // large constant pos_error
-
-  // First cycle reports the still-zero pre-update accumulator (see the
-  // one-cycle-lag note in UpdateCommands_Integral_AccumulatesOverMultipleCycles);
-  // from the second cycle on, back_calculation has already saturated i_term at
-  // i_max and keeps it there.
-  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
-
-  for (int k = 0; k < 3; ++k) {
-    ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-    EXPECT_NEAR(cmd_storage_[0], 0.01, 1e-9);
-  }
-}
-
-TEST_F(PdFfControllerTest, OnActivate_ResetsIntegralAccumulator)
-{
-  ASSERT_EQ(
-    init_controller({"j1"}, {0.0}, {0.0}, {"position", "velocity", "effort"},
-      {"position", "velocity"}, /*gains_i=*/{2.0}, /*gains_i_max=*/{1000.0},
-      /*gains_i_min=*/{-1000.0}),
-    ci::return_type::OK);
-  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
-  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
-  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
-
-  ctrl_->reference_interfaces_[0] = 1.0;
-  for (int k = 0; k < 3; ++k) {
-    ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  }
-  ASSERT_GT(cmd_storage_[0], 0.0);  // integral has built up
-
-  // Reactivate: algo_.reset() clears the integral accumulator, and on_activate()
-  // reseeds reference_interfaces_ from the current (still-zero) hardware state.
-  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
-  EXPECT_NEAR(ctrl_->reference_interfaces_[0], 0.0, 1e-9);
-
-  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
-}
-
-// ── diagnostic publishers (tau_i) ───────────────────────────────────────────
-
-TEST_F(PdFfControllerTest, TauIPublisher_SizeMatchesNJoints)
-{
-  ASSERT_EQ(init_controller({"j1", "j2", "j3"}, {1.0, 1.0, 1.0}, {0.0, 0.0, 0.0}),
-    ci::return_type::OK);
-  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
-  export_and_assign_interfaces({"j1", "j2", "j3"}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
-  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
-
-  std::optional<std_msgs::msg::Float64MultiArray> received;
-  auto sub_node = rclcpp::Node::make_shared("test_tau_i_sub");
-  auto sub = sub_node->create_subscription<std_msgs::msg::Float64MultiArray>(
-    "/test_pd_ff/tau_i", rclcpp::SystemDefaultsQoS(),
-    [&received](std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-      received = *msg;
-    });
-
-  ctrl_->reference_interfaces_[0] = 1.0;
-  ctrl_->reference_interfaces_[1] = 1.0;
-  ctrl_->reference_interfaces_[2] = 1.0;
-  ctrl_->update(t0(), dt1ms());
-
-  rclcpp::executors::SingleThreadedExecutor exec;
-  exec.add_node(ctrl_->get_node()->get_node_base_interface());
-  exec.add_node(sub_node);
-  const auto deadline =
-    std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
-  while (!received && std::chrono::steady_clock::now() < deadline) {
-    exec.spin_some(std::chrono::milliseconds(10));
-  }
-
-  ASSERT_TRUE(received.has_value());
-  EXPECT_EQ(received->data.size(), 3u);
-}
-
 // ── leg grouping & gait-state gain switching ────────────────────────────────
 
 TEST_F(PdFfControllerTest, UpdateRefFromSubscribers_GaitStateSwing_SelectsSwingGains)
 {
   ASSERT_EQ(
     init_controller({"j1"}, {10.0}, {0.0}, {"position", "velocity", "effort", "gait_state"},
-      {"position", "velocity"}, /*gains_i=*/{}, /*gains_i_max=*/{}, /*gains_i_min=*/{},
-      /*gains_p_swing=*/{20.0}),
+      {"position", "velocity"}, /*gains_p_swing=*/{20.0}),
     ci::return_type::OK);
   ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
   export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
@@ -861,8 +725,7 @@ TEST_F(PdFfControllerTest, UpdateCommands_ChainedGaitStateSwing_SelectsSwingGain
 {
   ASSERT_EQ(
     init_controller({"j1"}, {10.0}, {0.0}, {"position", "velocity", "effort", "gait_state"},
-      {"position", "velocity"}, /*gains_i=*/{}, /*gains_i_max=*/{}, /*gains_i_min=*/{},
-      /*gains_p_swing=*/{20.0}),
+      {"position", "velocity"}, /*gains_p_swing=*/{20.0}),
     ci::return_type::OK);
   ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
   export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
@@ -878,33 +741,6 @@ TEST_F(PdFfControllerTest, UpdateCommands_ChainedGaitStateSwing_SelectsSwingGain
 
   // Swing gain (20.0) selected: tau = 20 * 1.0 = 20.0
   EXPECT_NEAR(cmd_storage_[0], 20.0, 1e-9);
-}
-
-TEST_F(PdFfControllerTest, UpdateCommands_PhaseFlip_ResetsIntegralAccumulator)
-{
-  ASSERT_EQ(
-    init_controller({"j1"}, {0.0}, {0.0}, {"position", "velocity", "effort", "gait_state"},
-      {"position", "velocity"}, /*gains_i=*/{2.0}, /*gains_i_max=*/{1000.0},
-      /*gains_i_min=*/{-1000.0}),
-    ci::return_type::OK);
-  ASSERT_EQ(configure(), ci::CallbackReturn::SUCCESS);
-  export_and_assign_interfaces({"j1"}, {0.0}, {0.0});
-  ASSERT_EQ(activate(), ci::CallbackReturn::SUCCESS);
-
-  ctrl_->reference_interfaces_[0] = 1.0;  // constant pos_ref; gait_state (block 3) stays 0.0=STANCE
-
-  // See the one-cycle-lag note in UpdateCommands_Integral_AccumulatesOverMultipleCycles.
-  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
-  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  EXPECT_NEAR(cmd_storage_[0], 0.002, 1e-9);
-
-  // Flip to swing — the joint's integral accumulator is reset this cycle.
-  ctrl_->reference_interfaces_[3] = 1.0;  // gait_state: SWING
-  ASSERT_EQ(ctrl_->update_and_write_commands(t0(), dt1ms()), ci::return_type::OK);
-  // Without the reset this would be 0.004 (continuing accumulation); with the
-  // reset it restarts from zero, matching the very first cycle's value.
-  EXPECT_NEAR(cmd_storage_[0], 0.0, 1e-9);
 }
 
 TEST_F(PdFfControllerTest, OnActivate_GaitStateBlockDefaultsToStance)
@@ -925,8 +761,7 @@ TEST_F(PdFfControllerTest, OnConfigure_JointNotCoveredByAnyLeg_ReturnsError)
   ASSERT_EQ(
     init_controller({"j1", "j2"}, {10.0, 10.0}, {0.0, 0.0},
       {"position", "velocity", "effort", "gait_state"}, {"position", "velocity"},
-      /*gains_i=*/{}, /*gains_i_max=*/{}, /*gains_i_min=*/{},
-      /*gains_p_swing=*/{}, /*gains_d_swing=*/{}, /*gains_i_swing=*/{},
+      /*gains_p_swing=*/{}, /*gains_d_swing=*/{},
       /*legs_names=*/{"legA"}, /*legs_joint_names=*/{{"j1"}}),
     ci::return_type::OK);
   // j2 is not covered by any leg.
@@ -938,8 +773,7 @@ TEST_F(PdFfControllerTest, OnConfigure_DuplicateLegNumber_ReturnsError)
   ASSERT_EQ(
     init_controller({"j1", "j2"}, {10.0, 10.0}, {0.0, 0.0},
       {"position", "velocity", "effort", "gait_state"}, {"position", "velocity"},
-      /*gains_i=*/{}, /*gains_i_max=*/{}, /*gains_i_min=*/{},
-      /*gains_p_swing=*/{}, /*gains_d_swing=*/{}, /*gains_i_swing=*/{},
+      /*gains_p_swing=*/{}, /*gains_d_swing=*/{},
       /*legs_names=*/{"legA", "legB"}, /*legs_joint_names=*/{{"j1"}, {"j2"}},
       /*legs_numbers=*/{0, 0}),
     ci::return_type::OK);

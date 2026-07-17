@@ -31,7 +31,7 @@ public:
     const rclcpp::Time &, const rclcpp::Duration &) override;
 
   controller_interface::return_type update_and_write_commands(
-    const rclcpp::Time &, const rclcpp::Duration & period) override;
+    const rclcpp::Time &, const rclcpp::Duration &) override;
 
 protected:
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
@@ -65,20 +65,16 @@ private:
   int gait_block_idx_{-1};     // index of "gait_state" in params_.reference_interfaces, or -1
   size_t n_legs_{0};
   std::vector<int64_t> joint_to_leg_number_;   // size n_joints_; joint i -> its leg's leg_number
-  std::vector<bool> joint_is_swing_;           // size n_joints_; previous-cycle phase per joint
 
-  // Per-joint P, I and D action publishers. Messages are pre-allocated in on_configure;
+  // Per-joint P and D action publishers. Messages are pre-allocated in on_configure;
   // data[i] is overwritten each cycle and published via try_publish (RT-safe).
   using PdActionsMsg = std_msgs::msg::Float64MultiArray;
   using PdActionsPublisher = realtime_tools::RealtimePublisher<PdActionsMsg>;
   rclcpp::Publisher<PdActionsMsg>::SharedPtr tau_p_pub_;
-  rclcpp::Publisher<PdActionsMsg>::SharedPtr tau_i_pub_;
   rclcpp::Publisher<PdActionsMsg>::SharedPtr tau_d_pub_;
   std::unique_ptr<PdActionsPublisher> rt_tau_p_pub_;
-  std::unique_ptr<PdActionsPublisher> rt_tau_i_pub_;
   std::unique_ptr<PdActionsPublisher> rt_tau_d_pub_;
   PdActionsMsg tau_p_msg_;
-  PdActionsMsg tau_i_msg_;
   PdActionsMsg tau_d_msg_;
 };
 

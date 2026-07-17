@@ -106,8 +106,6 @@ controller_interface::CallbackReturn PdFfController::on_configure(
       return CallbackReturn::ERROR;
     }
   }
-  joint_is_swing_.assign(n_joints_, false);
-
   auto sub_qos = rclcpp::SystemDefaultsQoS();
   sub_qos.keep_last(1).best_effort();
 
@@ -125,22 +123,19 @@ controller_interface::CallbackReturn PdFfController::on_configure(
 
   // pre-allocate message storage so the RT loop never allocates
   tau_p_msg_.data.assign(n_joints_, 0.0);
-  tau_i_msg_.data.assign(n_joints_, 0.0);
   tau_d_msg_.data.assign(n_joints_, 0.0);
 
   auto pub_qos = rclcpp::SystemDefaultsQoS();
   tau_p_pub_ = get_node()->create_publisher<PdActionsMsg>("~/tau_p", pub_qos);
-  tau_i_pub_ = get_node()->create_publisher<PdActionsMsg>("~/tau_i", pub_qos);
   tau_d_pub_ = get_node()->create_publisher<PdActionsMsg>("~/tau_d", pub_qos);
   rt_tau_p_pub_ = std::make_unique<PdActionsPublisher>(tau_p_pub_);
-  rt_tau_i_pub_ = std::make_unique<PdActionsPublisher>(tau_i_pub_);
   rt_tau_d_pub_ = std::make_unique<PdActionsPublisher>(tau_d_pub_);
 
   // Seed algorithm with initial (stance) gains — no gait signal exists yet.
   std::vector<PdFf::JointGains> gains(n_joints_);
   for (size_t i = 0; i < n_joints_; ++i) {
     const auto & g = params_.gains.joint_names_map.at(params_.joint_names[i]).stance;
-    gains[i] = {g.p, g.d, g.i, g.i_max, g.i_min};
+    gains[i] = {g.p, g.d};
   }
   algo_.setGains(gains);
 
@@ -150,11 +145,6 @@ controller_interface::CallbackReturn PdFfController::on_configure(
 controller_interface::CallbackReturn PdFfController::on_activate(
   const rclcpp_lifecycle::State &)
 {
-  // Clear PID internal state (integral accumulator, etc.) on every activation
-  // so windup doesn't carry over from a previous activate/deactivate cycle.
-  algo_.reset();
-  std::fill(joint_is_swing_.begin(), joint_is_swing_.end(), false);
-
   const size_t n_ref   = params_.reference_interfaces.size();
   const size_t n_state = params_.state_interfaces.size();
 
@@ -242,7 +232,7 @@ controller_interface::return_type PdFfController::update_reference_from_subscrib
 }
 
 controller_interface::return_type PdFfController::update_and_write_commands(
-  const rclcpp::Time &, const rclcpp::Duration & period)
+  const rclcpp::Time &, const rclcpp::Duration &)
 {
   // Refresh gains each cycle — they are declared dynamic in the YAML so they
   // can be updated at runtime via ros2 param set without restarting the controller.
@@ -254,19 +244,13 @@ controller_interface::return_type PdFfController::update_and_write_commands(
       const double v = reference_interfaces_[static_cast<size_t>(gait_block_idx_) * n_joints_ + i];
       is_swing = std::isfinite(v) && v >= 0.5;
     }
-    if (is_swing != joint_is_swing_[i]) {
-      // Clear this joint's integral accumulator on a phase flip so the old
-      // phase's accumulated error isn't multiplied by the new phase's gains.
-      algo_.resetJoint(i);
-      joint_is_swing_[i] = is_swing;
-    }
     const auto & g = params_.gains.joint_names_map.at(params_.joint_names[i]);
     if (is_swing) {
       const auto & phase = g.swing;
-      gains[i] = {phase.p, phase.d, phase.i, phase.i_max, phase.i_min};
+      gains[i] = {phase.p, phase.d};
     } else {
       const auto & phase = g.stance;
-      gains[i] = {phase.p, phase.d, phase.i, phase.i_max, phase.i_min};
+      gains[i] = {phase.p, phase.d};
     }
   }
   algo_.setGains(gains);
@@ -282,9 +266,8 @@ controller_interface::return_type PdFfController::update_and_write_commands(
   for (size_t i = 0; i < n_joints_; ++i) {
     const double ref0   = reference_interfaces_[0 * n_joints_ + i];
     const auto   state0 = state_interfaces_[0 * n_joints_ + i].get_optional();
-    // On skip, pos_error/vel_error stay 0.0, which drives Pid::compute_command
-    // with error=0 this cycle — a no-op on the integral accumulator, not a
-    // skip of the PID update itself.
+    // On skip, pos_error/vel_error stay 0.0, producing zero P/D contribution
+    // for this joint this cycle, rather than skipping the write entirely.
     if (!state0.has_value() || !std::isfinite(ref0)) continue;
     pos_error[i] = ref0 - state0.value();
 
@@ -303,19 +286,17 @@ controller_interface::return_type PdFfController::update_and_write_commands(
   }
 
   // Delegate to algorithm.
-  const auto out = algo_.compute(pos_error, vel_error, ff, period.nanoseconds());
+  const auto out = algo_.compute(pos_error, vel_error, ff);
 
   // Write commands and fill diagnostic messages.
   for (size_t i = 0; i < n_joints_; ++i) {
     tau_p_msg_.data[i] = out.tau_p[i];
-    tau_i_msg_.data[i] = out.tau_i[i];
     tau_d_msg_.data[i] = out.tau_d[i];
     if (!command_interfaces_[i].set_value(out.tau[i]))
       RCLCPP_ERROR(get_node()->get_logger(), "Cannot set command on dof [%zu]!", i);
   }
 
   rt_tau_p_pub_->try_publish(tau_p_msg_);
-  rt_tau_i_pub_->try_publish(tau_i_msg_);
   rt_tau_d_pub_->try_publish(tau_d_msg_);
   return controller_interface::return_type::OK;
 }

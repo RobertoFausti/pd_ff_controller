@@ -79,22 +79,6 @@ pd_ff_controller:
           type: double
           default_value: 0.0
           description: "Stance-phase velocity error derivative gain."
-        i:
-          type: double
-          default_value: 0.0
-          description: "Stance-phase position error integral gain."
-        i_max:
-          type: double
-          default_value: 0.0
-          description: "Stance-phase upper clamp for the integral contribution (back_calculation anti-windup)."
-          validation:
-            gt_eq<>: [0.0]
-        i_min:
-          type: double
-          default_value: 0.0
-          description: "Stance-phase lower clamp for the integral contribution (back_calculation anti-windup)."
-          validation:
-            lt_eq<>: [0.0]
       swing:
         p:
           type: double
@@ -104,19 +88,3 @@ pd_ff_controller:
           type: double
           default_value: 0.0
           description: "Swing-phase velocity error derivative gain."
-        i:
-          type: double
-          default_value: 0.0
-          description: "Swing-phase position error integral gain."
-        i_max:
-          type: double
-          default_value: 0.0
-          description: "Swing-phase upper clamp for the integral contribution (back_calculation anti-windup)."
-          validation:
-            gt_eq<>: [0.0]
-        i_min:
-          type: double
-          default_value: 0.0
-          description: "Swing-phase lower clamp for the integral contribution (back_calculation anti-windup)."
-          validation:
-            lt_eq<>: [0.0]

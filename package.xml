@@ -6,7 +6,6 @@
   <maintainer email="robertofausti@cnr.it">Roberto Fausti</maintainer>
   <license>Apache-2.0</license>
 
-  <depend>control_toolbox</depend>
   <depend>controller_interface</depend>
   <depend>std_msgs</depend>
   <depend>hardware_interface</depend>
